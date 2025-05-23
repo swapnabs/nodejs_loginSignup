@@ -1,49 +1,62 @@
 const express = require('express');
-const router = express.Router();
-const pool = require('../db');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const router = express.Router();
+const db = require('../models');
+const User = db.User;
 
-// Register
--.post('/signup', async (req, res) => {
+const JWT_SECRET = process.env.JWT_SECRET;
+
+// Signup
+router.post('/signup', async (req, res) => {
   const { name, email, password } = req.body;
-
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const existing = await User.findOne({ where: { email } });
+    if (existing) return res.status(400).json({ message: 'User already exists' });
 
-    const result = await pool.query(
-      'INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING *',
-      [name, email, hashedPassword]
-    );
+    const hashed = await bcrypt.hash(password, 10);
+    const newUser = await User.create({ name, email, password: hashed });
 
-    res.status(201).json({ user: result.rows[0] });
+    const token = jwt.sign({ id: newUser.id }, JWT_SECRET, { expiresIn: '1h' });
+    res.status(201).json({ token });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ message: err.message });
   }
 });
 
 // Login
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
-
   try {
-    const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = await User.findOne({ where: { email } });
+    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
 
-    if (user.rows.length === 0) {
-      return res.status(400).json({ error: 'User not found' });
-    }
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(400).json({ message: 'Invalid credentials' });
 
-    const valid = await bcrypt.compare(password, user.rows[0].password);
-    if (!valid) {
-      return res.status(400).json({ error: 'Invalid password' });
-    }
-
-    const token = jwt.sign({ id: user.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-    res.json({ token, user: { id: user.rows[0].id, name: user.rows[0].name } });
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ message: err.message });
   }
 });
+
+// Protected route
+router.get('/home', verifyToken, (req, res) => {
+  res.json({ message: 'Welcome to the protected home route!' });
+});
+
+function verifyToken(req, res, next) {
+  const token = req.headers['authorization'];
+  if (!token) return res.status(403).json({ message: 'Token required' });
+
+  try {
+    const decoded = jwt.verify(token.split(" ")[1], JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(401).json({ message: 'Invalid token' });
+  }
+}
 
 module.exports = router;
